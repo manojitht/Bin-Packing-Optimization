@@ -35,7 +35,7 @@ async def optimize_container(
     if algorithm == "greedy":
         results = optimizer.greedy_heuristic(pallets)
     elif algorithm == "milp":
-        results = {"error": "MILP not yet implemented"}
+        results = optimizer.milp(pallets)
     elif algorithm == "genetic":
         results = {"error": "Genetic Algorithm not yet implemented"}
         
