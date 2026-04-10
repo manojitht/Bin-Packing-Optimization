@@ -3,6 +3,7 @@ import io
 import base64
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import pulp
 
 class ContainerOptimizer:
     def __init__(self, length=40, width=8, height=8, weight_limit=29000):
@@ -46,6 +47,104 @@ class ContainerOptimizer:
             "space_utilization": round(space_utilized, 2),
             "weight_utilization": round(weight_utilized, 2),
             "runtime": f"{runtime}s",
+            "image_base64": self.visualize()
+        }
+    
+    def milp(self, pallets, time_limit_seconds=180):
+        start_time = time.time()
+        
+        # Initialize the MILP Problem
+        prob = pulp.LpProblem("Container_Optimization", pulp.LpMaximize)
+        
+        N = len(pallets)
+        
+        # 1. DECISION VARIABLES
+        # s_i: 1 if pallet i is selected, 0 otherwise
+        s = pulp.LpVariable.dicts("selected", range(N), cat=pulp.LpBinary)
+        
+        # x, y, z coordinates for the bottom-left corner of each pallet
+        x = pulp.LpVariable.dicts("x", range(N), lowBound=0, upBound=self.length, cat=pulp.LpContinuous)
+        y = pulp.LpVariable.dicts("y", range(N), lowBound=0, upBound=self.width, cat=pulp.LpContinuous)
+        z = pulp.LpVariable.dicts("z", range(N), lowBound=0, upBound=self.height, cat=pulp.LpContinuous)
+        
+        # Relative positioning variables to prevent overlapping
+        l = pulp.LpVariable.dicts("left", [(i, j) for i in range(N) for j in range(N) if i < j], cat=pulp.LpBinary)
+        r = pulp.LpVariable.dicts("right", [(i, j) for i in range(N) for j in range(N) if i < j], cat=pulp.LpBinary)
+        f = pulp.LpVariable.dicts("front", [(i, j) for i in range(N) for j in range(N) if i < j], cat=pulp.LpBinary)
+        b = pulp.LpVariable.dicts("back", [(i, j) for i in range(N) for j in range(N) if i < j], cat=pulp.LpBinary)
+        u = pulp.LpVariable.dicts("under", [(i, j) for i in range(N) for j in range(N) if i < j], cat=pulp.LpBinary)
+        d = pulp.LpVariable.dicts("above", [(i, j) for i in range(N) for j in range(N) if i < j], cat=pulp.LpBinary)
+
+        # 2. OBJECTIVE FUNCTION
+        prob += pulp.lpSum([float(pallets[i]['profit']) * s[i] for i in range(N)]), "Total_Profit"
+
+        # 3. CONSTRAINTS
+        # Total Weight Constraint
+        prob += pulp.lpSum([float(pallets[i]['weight']) * s[i] for i in range(N)]) <= self.weight_limit, "Weight_Limit"
+
+        # Big M constants (Large enough to deactivate constraints when items aren't selected)
+        Mx = self.length
+        My = self.width
+        Mz = self.height
+
+        for i in range(N):
+            # Boundary constraints: Items must fit inside the container if selected
+            prob += x[i] + float(pallets[i]['length']) <= self.length + Mx * (1 - s[i])
+            prob += y[i] + float(pallets[i]['width']) <= self.width + My * (1 - s[i])
+            prob += z[i] + float(pallets[i]['height']) <= self.height + Mz * (1 - s[i])
+
+            # Non-overlapping constraints (Only active if BOTH i and j are selected)
+            for j in range(i + 1, N):
+                # If both are selected, they must be separated in at least one spatial dimension
+                prob += x[i] + float(pallets[i]['length']) <= x[j] + Mx * (1 - l[(i, j)]) + Mx * (2 - s[i] - s[j])
+                prob += x[j] + float(pallets[j]['length']) <= x[i] + Mx * (1 - r[(i, j)]) + Mx * (2 - s[i] - s[j])
+                
+                prob += y[i] + float(pallets[i]['width']) <= y[j] + My * (1 - f[(i, j)]) + My * (2 - s[i] - s[j])
+                prob += y[j] + float(pallets[j]['width']) <= y[i] + My * (1 - b[(i, j)]) + My * (2 - s[i] - s[j])
+                
+                prob += z[i] + float(pallets[i]['height']) <= z[j] + Mz * (1 - u[(i, j)]) + Mz * (2 - s[i] - s[j])
+                prob += z[j] + float(pallets[j]['height']) <= z[i] + Mz * (1 - d[(i, j)]) + Mz * (2 - s[i] - s[j])
+
+                # At least one separation direction must be true
+                prob += l[(i, j)] + r[(i, j)] + f[(i, j)] + b[(i, j)] + u[(i, j)] + d[(i, j)] >= s[i] + s[j] - 1
+
+        # 4. SOLVE (With Time Limit to prevent infinite hanging)
+        solver = pulp.PULP_CBC_CMD(timeLimit=time_limit_seconds, msg=False)
+        prob.solve(solver)
+
+        runtime = round(time.time() - start_time, 4)
+
+        # 5. PROCESS RESULTS
+        self.total_profit = 0
+        self.loaded_pallets = []
+        
+        if prob.status == pulp.LpStatusOptimal or prob.status == pulp.LpStatusNotSolved: # Might hit time limit but have partial solution
+            for i in range(N):
+                if pulp.value(s[i]) == 1.0:
+                    px = round(pulp.value(x[i]))
+                    py = round(pulp.value(y[i]))
+                    pz = round(pulp.value(z[i]))
+                    
+                    pallet = pallets[i]
+                    self.loaded_pallets.append({
+                        "id": pallet['id'],
+                        "position": (px, py, pz),
+                        "dimensions": (pallet['length'], pallet['width'], pallet['height']),
+                        "color": self.color_palette[i % len(self.color_palette)]
+                    })
+                    self.remaining_weight -= float(pallet['weight'])
+                    self.total_profit += float(pallet['profit'])
+
+        space_utilized = self._calculate_space_utilization()
+        weight_utilized = ((self.weight_limit - self.remaining_weight) / self.weight_limit) * 100
+
+        return {
+            "algorithm": "Exact Method (MILP)",
+            "profit": self.total_profit,
+            "pallets_loaded": len(self.loaded_pallets),
+            "space_utilization": round(space_utilized, 2),
+            "weight_utilization": round(weight_utilized, 2),
+            "runtime": f"{runtime}s (Max {time_limit_seconds}s)",
             "image_base64": self.visualize()
         }
 
