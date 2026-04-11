@@ -52,6 +52,7 @@ The optimization models are evaluated using a synthetic, logistics-oriented data
 
 To guarantee true optimality, the problem is formulated as a **Mixed-Integer Linear Programming (MILP)** model. The physical geometry is translated into algebraic equations using the "Big-M" method.
 
+![img alt](https://github.com/manojitht/conex-pallet-optimization/blob/87a333e0ca8df6a18ad113a7fb68db320d2130b2/results/mathematic_formulation.png)
 
 -----
 
